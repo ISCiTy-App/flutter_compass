@@ -30,7 +30,7 @@ public final class FlutterCompassPlugin implements FlutterPlugin, StreamHandler 
     private static final int SENSOR_DELAY_MICROS = 30 * 1000;
 
     // Filtering coefficient 0 < ALPHA < 1
-    private static final float ALPHA = 0.45f;
+    private static final float ALPHA = 0.97f;
 
     // Controls the compass update rate in milliseconds
     private static final int COMPASS_UPDATE_RATE_MS = 32;
@@ -41,20 +41,20 @@ public final class FlutterCompassPlugin implements FlutterPlugin, StreamHandler 
     private SensorManager sensorManager;
 
     @Nullable
-    private Sensor compassSensor;
-    @Nullable
     private Sensor gravitySensor;
+    @Nullable
+    private Sensor gyroscopeSensor;
     @Nullable
     private Sensor magneticFieldSensor;
 
     private float[] truncatedRotationVectorValue = new float[4];
     private float[] rotationMatrix = new float[9];
-    private float[] rotationVectorValue;
     private float lastHeading;
     private int lastAccuracySensorStatus;
 
     private long compassUpdateNextTimestamp;
     private float[] gravityValues = new float[3];
+    private float[] gyroscopeValues = new float[3];
     private float[] magneticValues = new float[3];
 
     public FlutterCompassPlugin() {
@@ -65,13 +65,9 @@ public final class FlutterCompassPlugin implements FlutterPlugin, StreamHandler 
         display = ((DisplayManager) context.getSystemService(Context.DISPLAY_SERVICE))
                 .getDisplay(Display.DEFAULT_DISPLAY);
         sensorManager = (SensorManager) context.getSystemService(Context.SENSOR_SERVICE);
-        compassSensor = sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR);
-        if (compassSensor == null) {
-            Log.d(TAG, "Rotation vector sensor not supported on device, "
-                    + "falling back to accelerometer and magnetic field.");
-        }
 
         gravitySensor = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER);
+        gyroscopeSensor = sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE);
         magneticFieldSensor = sensorManager.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD);
     }
 
@@ -90,26 +86,16 @@ public final class FlutterCompassPlugin implements FlutterPlugin, StreamHandler 
     public void onListen(Object arguments, EventSink events) {
         sensorEventListener = createSensorEventListener(events);
 
-        if (isCompassSensorAvailable()) {
-            // Does nothing if the sensors already registered.
-            sensorManager.registerListener(sensorEventListener, compassSensor, SENSOR_DELAY_MICROS);
-        }
-
         sensorManager.registerListener(sensorEventListener, gravitySensor, SENSOR_DELAY_MICROS);
+        sensorManager.registerListener(sensorEventListener, gyroscopeSensor, SENSOR_DELAY_MICROS);
         sensorManager.registerListener(sensorEventListener, magneticFieldSensor, SENSOR_DELAY_MICROS);
     }
 
     public void onCancel(Object arguments) {
-        if (isCompassSensorAvailable()) {
-            sensorManager.unregisterListener(sensorEventListener, compassSensor);
-        }
 
         sensorManager.unregisterListener(sensorEventListener, gravitySensor);
+        sensorManager.unregisterListener(sensorEventListener, gyroscopeSensor);
         sensorManager.unregisterListener(sensorEventListener, magneticFieldSensor);
-    }
-
-    private boolean isCompassSensorAvailable() {
-        return compassSensor != null;
     }
 
     SensorEventListener createSensorEventListener(final EventSink events) {
@@ -118,18 +104,24 @@ public final class FlutterCompassPlugin implements FlutterPlugin, StreamHandler 
             public void onSensorChanged(SensorEvent event) {
                 if (lastAccuracySensorStatus == SensorManager.SENSOR_STATUS_UNRELIABLE) {
                     Log.d(TAG, "Compass sensor is unreliable, device calibration is needed.");
-                    // Update the heading, even if the sensor is unreliable.
-                    // This makes it possible to use a different indicator for the unreliable case,
-                    // instead of just changing the RenderMode to NORMAL.
                 }
-                if (event.sensor.getType() == Sensor.TYPE_ROTATION_VECTOR) {
-                    rotationVectorValue = getRotationVectorFromSensorEvent(event);
+
+                if (event.sensor.getType() == Sensor.TYPE_ACCELEROMETER) {
+                    gravityValues[0] = ALPHA * gravityValues[0] + (1 - ALPHA) * event.values[0];
+                    gravityValues[1] = ALPHA * gravityValues[1] + (1 - ALPHA) * event.values[1];
+                    gravityValues[2] = ALPHA * gravityValues[2] + (1 - ALPHA) * event.values[2];
                     updateOrientation();
-                } else if (event.sensor.getType() == Sensor.TYPE_ACCELEROMETER && !isCompassSensorAvailable()) {
-                    gravityValues = lowPassFilter(getRotationVectorFromSensorEvent(event), gravityValues);
+                } else
+
+                if (event.sensor.getType() == Sensor.TYPE_GYROSCOPE) {
+                    gyroscopeValues[0] = ALPHA * gyroscopeValues[0] + (1 - ALPHA) * event.values[0];
+                    gyroscopeValues[1] = ALPHA * gyroscopeValues[1] + (1 - ALPHA) * event.values[1];
+                    gyroscopeValues[2] = ALPHA * gyroscopeValues[2] + (1 - ALPHA) * event.values[2];
                     updateOrientation();
-                } else if (event.sensor.getType() == Sensor.TYPE_MAGNETIC_FIELD && !isCompassSensorAvailable()) {
-                    magneticValues = lowPassFilter(getRotationVectorFromSensorEvent(event), magneticValues);
+                } else if (event.sensor.getType() == Sensor.TYPE_MAGNETIC_FIELD) {
+                    magneticValues[0] = ALPHA * magneticValues[0] + (1 - ALPHA) * event.values[0];
+                    magneticValues[1] = ALPHA * magneticValues[1] + (1 - ALPHA) * event.values[1];
+                    magneticValues[2] = ALPHA * magneticValues[2] + (1 - ALPHA) * event.values[2];
                     updateOrientation();
                 }
             }
@@ -148,123 +140,15 @@ public final class FlutterCompassPlugin implements FlutterPlugin, StreamHandler 
                 if (currentTime < compassUpdateNextTimestamp) {
                     return;
                 }
+                SensorManager.getRotationMatrix(rotationMatrix, null, gravityValues, magneticValues);
 
-                if (rotationVectorValue != null) {
-                    SensorManager.getRotationMatrixFromVector(rotationMatrix, rotationVectorValue);
-                } else {
-                    // Get rotation matrix given the gravity and geomagnetic matrices
-                    SensorManager.getRotationMatrix(rotationMatrix, null, gravityValues, magneticValues);
-                }
-
-                int worldAxisForDeviceAxisX;
-                int worldAxisForDeviceAxisY;
-
-                // Assume the device screen was parallel to the ground,
-                // and adjust the rotation matrix for the device orientation.
-                switch (display.getRotation()) {
-                    case Surface.ROTATION_90:
-                        worldAxisForDeviceAxisX = SensorManager.AXIS_Y;
-                        worldAxisForDeviceAxisY = SensorManager.AXIS_MINUS_X;
-                        break;
-                    case Surface.ROTATION_180:
-                        worldAxisForDeviceAxisX = SensorManager.AXIS_MINUS_X;
-                        worldAxisForDeviceAxisY = SensorManager.AXIS_MINUS_Y;
-                        break;
-                    case Surface.ROTATION_270:
-                        worldAxisForDeviceAxisX = SensorManager.AXIS_MINUS_Y;
-                        worldAxisForDeviceAxisY = SensorManager.AXIS_X;
-                        break;
-                    case Surface.ROTATION_0:
-                    default:
-                        worldAxisForDeviceAxisX = SensorManager.AXIS_X;
-                        worldAxisForDeviceAxisY = SensorManager.AXIS_Y;
-                        break;
-                }
-
-                float[] adjustedRotationMatrix = new float[9];
-                SensorManager.remapCoordinateSystem(rotationMatrix, worldAxisForDeviceAxisX, worldAxisForDeviceAxisY,
-                        adjustedRotationMatrix);
 
                 // Transform rotation matrix into azimuth/pitch/roll
                 float[] orientation = new float[3];
-                SensorManager.getOrientation(adjustedRotationMatrix, orientation);
-
-                if (orientation[1] < -Math.PI / 4) {
-                    // The pitch is less than -45 degrees.
-                    // Remap the axes as if the device screen was the instrument panel.
-                    switch (display.getRotation()) {
-                        case Surface.ROTATION_90:
-                            worldAxisForDeviceAxisX = SensorManager.AXIS_Z;
-                            worldAxisForDeviceAxisY = SensorManager.AXIS_MINUS_X;
-                            break;
-                        case Surface.ROTATION_180:
-                            worldAxisForDeviceAxisX = SensorManager.AXIS_MINUS_X;
-                            worldAxisForDeviceAxisY = SensorManager.AXIS_MINUS_Z;
-                            break;
-                        case Surface.ROTATION_270:
-                            worldAxisForDeviceAxisX = SensorManager.AXIS_MINUS_Z;
-                            worldAxisForDeviceAxisY = SensorManager.AXIS_X;
-                            break;
-                        case Surface.ROTATION_0:
-                        default:
-                            worldAxisForDeviceAxisX = SensorManager.AXIS_X;
-                            worldAxisForDeviceAxisY = SensorManager.AXIS_Z;
-                            break;
-                    }
-                } else if (orientation[1] > Math.PI / 4) {
-                    // The pitch is larger than 45 degrees.
-                    // Remap the axes as if the device screen was upside down and facing back.
-                    switch (display.getRotation()) {
-                        case Surface.ROTATION_90:
-                            worldAxisForDeviceAxisX = SensorManager.AXIS_MINUS_Z;
-                            worldAxisForDeviceAxisY = SensorManager.AXIS_MINUS_X;
-                            break;
-                        case Surface.ROTATION_180:
-                            worldAxisForDeviceAxisX = SensorManager.AXIS_MINUS_X;
-                            worldAxisForDeviceAxisY = SensorManager.AXIS_Z;
-                            break;
-                        case Surface.ROTATION_270:
-                            worldAxisForDeviceAxisX = SensorManager.AXIS_Z;
-                            worldAxisForDeviceAxisY = SensorManager.AXIS_X;
-                            break;
-                        case Surface.ROTATION_0:
-                        default:
-                            worldAxisForDeviceAxisX = SensorManager.AXIS_X;
-                            worldAxisForDeviceAxisY = SensorManager.AXIS_MINUS_Z;
-                            break;
-                    }
-                } else if (Math.abs(orientation[2]) > Math.PI / 2) {
-                    // The roll is less than -90 degrees, or is larger than 90 degrees.
-                    // Remap the axes as if the device screen was face down.
-                    switch (display.getRotation()) {
-                        case Surface.ROTATION_90:
-                            worldAxisForDeviceAxisX = SensorManager.AXIS_MINUS_Y;
-                            worldAxisForDeviceAxisY = SensorManager.AXIS_MINUS_X;
-                            break;
-                        case Surface.ROTATION_180:
-                            worldAxisForDeviceAxisX = SensorManager.AXIS_MINUS_X;
-                            worldAxisForDeviceAxisY = SensorManager.AXIS_Y;
-                            break;
-                        case Surface.ROTATION_270:
-                            worldAxisForDeviceAxisX = SensorManager.AXIS_Y;
-                            worldAxisForDeviceAxisY = SensorManager.AXIS_X;
-                            break;
-                        case Surface.ROTATION_0:
-                        default:
-                            worldAxisForDeviceAxisX = SensorManager.AXIS_X;
-                            worldAxisForDeviceAxisY = SensorManager.AXIS_MINUS_Y;
-                            break;
-                    }
-                }
-
-                SensorManager.remapCoordinateSystem(rotationMatrix, worldAxisForDeviceAxisX, worldAxisForDeviceAxisY,
-                        adjustedRotationMatrix);
-
-                // Transform rotation matrix into azimuth/pitch/roll
-                SensorManager.getOrientation(adjustedRotationMatrix, orientation);
+                SensorManager.getOrientation(rotationMatrix, orientation);
 
                 double[] v = new double[3];
-                v[0] = Math.toDegrees(orientation[0]);
+                v[0] = (Math.toDegrees(orientation[0]) + 360) % 360;
                 v[2] = getAccuracy();
                 // The x-axis is all we care about here.
                 notifyCompassChangeListeners(v);
@@ -287,45 +171,6 @@ public final class FlutterCompassPlugin implements FlutterPlugin, StreamHandler 
                     return 45;
                 } else {
                     return -1; // unknown
-                }
-            }
-
-            /**
-             * Helper function, that filters newValues, considering previous values
-             *
-             * @param newValues      array of float, that contains new data
-             * @param smoothedValues array of float, that contains previous state
-             * @return float filtered array of float
-             */
-            private float[] lowPassFilter(float[] newValues, float[] smoothedValues) {
-                if (smoothedValues == null) {
-                    return newValues;
-                }
-                for (int i = 0; i < newValues.length; i++) {
-                    smoothedValues[i] = smoothedValues[i] + ALPHA * (newValues[i] - smoothedValues[i]);
-                }
-                return smoothedValues;
-            }
-
-            /**
-             * Pulls out the rotation vector from a SensorEvent, with a maximum length
-             * vector of four elements to avoid potential compatibility issues.
-             *
-             * @param event the sensor event
-             * @return the events rotation vector, potentially truncated
-             */
-            @NonNull
-            private float[] getRotationVectorFromSensorEvent(@NonNull SensorEvent event) {
-                if (event.values.length > 4) {
-                    // On some Samsung devices SensorManager.getRotationMatrixFromVector
-                    // appears to throw an exception if rotation vector has length > 4.
-                    // For the purposes of this class the first 4 values of the
-                    // rotation vector are sufficient (see crbug.com/335298 for details).
-                    // Only affects Android 4.3
-                    System.arraycopy(event.values, 0, truncatedRotationVectorValue, 0, 4);
-                    return truncatedRotationVectorValue;
-                } else {
-                    return event.values;
                 }
             }
         };
