@@ -43,8 +43,6 @@ public final class FlutterCompassPlugin implements FlutterPlugin, StreamHandler 
     @Nullable
     private Sensor gravitySensor;
     @Nullable
-    private Sensor gyroscopeSensor;
-    @Nullable
     private Sensor magneticFieldSensor;
 
     private float[] truncatedRotationVectorValue = new float[4];
@@ -54,7 +52,6 @@ public final class FlutterCompassPlugin implements FlutterPlugin, StreamHandler 
 
     private long compassUpdateNextTimestamp;
     private float[] gravityValues = new float[3];
-    private float[] gyroscopeValues = new float[3];
     private float[] magneticValues = new float[3];
 
     public FlutterCompassPlugin() {
@@ -66,9 +63,10 @@ public final class FlutterCompassPlugin implements FlutterPlugin, StreamHandler 
                 .getDisplay(Display.DEFAULT_DISPLAY);
         sensorManager = (SensorManager) context.getSystemService(Context.SENSOR_SERVICE);
 
-        gravitySensor = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER);
-        gyroscopeSensor = sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE);
-        magneticFieldSensor = sensorManager.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD);
+        if (sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER) != null && sensorManager.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD) != null) {
+            gravitySensor = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER);
+            magneticFieldSensor = sensorManager.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD);
+        }
     }
 
     // New Plugin APIs
@@ -85,17 +83,19 @@ public final class FlutterCompassPlugin implements FlutterPlugin, StreamHandler 
 
     public void onListen(Object arguments, EventSink events) {
         sensorEventListener = createSensorEventListener(events);
-
-        sensorManager.registerListener(sensorEventListener, gravitySensor, SENSOR_DELAY_MICROS);
-        sensorManager.registerListener(sensorEventListener, gyroscopeSensor, SENSOR_DELAY_MICROS);
-        sensorManager.registerListener(sensorEventListener, magneticFieldSensor, SENSOR_DELAY_MICROS);
+        if (gravitySensor != null && magneticFieldSensor != null) {
+            sensorManager.registerListener(sensorEventListener, gravitySensor, SENSOR_DELAY_MICROS);
+            sensorManager.registerListener(sensorEventListener, magneticFieldSensor, SENSOR_DELAY_MICROS);
+        } else {
+            events.error("404", "Thiết bị này không hỗ trợ từ kế.\nChúng tôi rất tiếc vì không thể hỗ trợ bạn.", null);
+        }
     }
 
     public void onCancel(Object arguments) {
-
-        sensorManager.unregisterListener(sensorEventListener, gravitySensor);
-        sensorManager.unregisterListener(sensorEventListener, gyroscopeSensor);
-        sensorManager.unregisterListener(sensorEventListener, magneticFieldSensor);
+        if (gravitySensor != null && magneticFieldSensor != null) {
+            sensorManager.unregisterListener(sensorEventListener, gravitySensor);
+            sensorManager.unregisterListener(sensorEventListener, magneticFieldSensor);
+        }
     }
 
     SensorEventListener createSensorEventListener(final EventSink events) {
@@ -110,13 +110,6 @@ public final class FlutterCompassPlugin implements FlutterPlugin, StreamHandler 
                     gravityValues[0] = ALPHA * gravityValues[0] + (1 - ALPHA) * event.values[0];
                     gravityValues[1] = ALPHA * gravityValues[1] + (1 - ALPHA) * event.values[1];
                     gravityValues[2] = ALPHA * gravityValues[2] + (1 - ALPHA) * event.values[2];
-                    updateOrientation();
-                } else
-
-                if (event.sensor.getType() == Sensor.TYPE_GYROSCOPE) {
-                    gyroscopeValues[0] = ALPHA * gyroscopeValues[0] + (1 - ALPHA) * event.values[0];
-                    gyroscopeValues[1] = ALPHA * gyroscopeValues[1] + (1 - ALPHA) * event.values[1];
-                    gyroscopeValues[2] = ALPHA * gyroscopeValues[2] + (1 - ALPHA) * event.values[2];
                     updateOrientation();
                 } else if (event.sensor.getType() == Sensor.TYPE_MAGNETIC_FIELD) {
                     magneticValues[0] = ALPHA * magneticValues[0] + (1 - ALPHA) * event.values[0];
